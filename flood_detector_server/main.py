@@ -26,15 +26,20 @@ INPUT_WIDTH = 640
 INPUT_HEIGHT = 640
 CONFIDENCE_THRESHOLD = 0.45
 
-# Mô hình chỉ có một class: 0 = ngap_lut.
-# Không phát hiện class này => xem frame là không phát hiện ngập lụt.
+# Danh sách 3 nhãn theo bộ dữ liệu Roboflow:
+# 0 = Flood (Ngập lụt), 1 = puddle (Vũng nước đọng), 2 = wet surface (Mặt đường ướt)
 CLASS_NAMES = {
-    0: "ngap_lut"
+    0: "Flood (Ngập lụt)",
+    1: "puddle (Vũng nước)",
+    2: "wet surface (Đường ướt)"
 }
 
-# Màu đỏ cho vùng ngập lụt.
+# Màu sắc riêng biệt cho từng mức độ cảnh báo:
+# Đỏ (#EF4444) cho Ngập lụt, Cam/Vàng (#F59E0B) cho Vũng nước, Xanh dương (#06B6D4) cho Mặt đường ướt
 CLASS_COLORS = {
-    0: "#EF4444"
+    0: "#EF4444",
+    1: "#F59E0B",
+    2: "#06B6D4"
 }
 
 
@@ -89,52 +94,42 @@ class RTDETRInferenceEngine:
         print(f"   Providers: {self.session.get_providers()}")
         print(f"   Inputs: {self.input_names} | Outputs: {self.output_names}")
 
-    def preprocess(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int], Tuple[float, float, int, int]]:
+    def preprocess(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int]]:
         """
         Tiền xử lý ảnh trực tiếp trong RAM (Zero-disk I/O):
-        - Letterbox resize giữ nguyên tỷ lệ khung hình (Aspect Ratio), tránh méo đối tượng.
+        - Resize trực tiếp về (INPUT_WIDTH, INPUT_HEIGHT) theo chuẩn RT-DETR (scale_fill=True).
         - Chuyển màu BGR -> RGB.
         - Chuẩn hóa [0, 255] -> [0.0, 1.0] dạng Float32.
         - HWC -> CHW và thêm chiều Batch Dimension (1, C, H, W).
         """
         orig_h, orig_w = img_bgr.shape[:2]
 
-        # 1. Tính toán Letterbox Resize
-        scale = min(INPUT_WIDTH / orig_w, INPUT_HEIGHT / orig_h)
-        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-        pad_w = (INPUT_WIDTH - new_w) // 2
-        pad_h = (INPUT_HEIGHT - new_h) // 2
-
-        resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-        # Canvas 640x640 với giá trị padding = 114 (chuẩn phổ biến của DETR/YOLO)
-        canvas = np.full((INPUT_HEIGHT, INPUT_WIDTH, 3), 114, dtype=np.uint8)
-        canvas[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
+        # 1. Resize trực tiếp về 640x640 (chuẩn RT-DETR)
+        resized = cv2.resize(img_bgr, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
 
         # 2. BGR -> RGB & Chuẩn hóa sang float32 [0.0, 1.0]
-        blob = canvas[:, :, ::-1].astype(np.float32) / 255.0
+        blob = resized[:, :, ::-1].astype(np.float32) / 255.0
 
         # 3. HWC -> CHW -> NCHW: (1, 3, 640, 640)
         blob = np.ascontiguousarray(np.transpose(blob, (2, 0, 1))[None, ...])
 
-        return blob, (orig_w, orig_h), (scale, scale, pad_w, pad_h)
+        return blob, (orig_w, orig_h)
 
     def postprocess(
         self,
         outputs: List[np.ndarray],
-        orig_size: Tuple[int, int],
-        pad_info: Tuple[float, float, int, int]
+        orig_size: Tuple[int, int]
     ) -> List[Dict]:
         """
         Hậu xử lý đầu ra của RT-DETR:
         - Tự động thích ứng cả 2 dạng ONNX export phổ biến:
           + Dạng tách: boxes (1, 300, 4) và scores (1, 300, num_classes)
-          + Dạng gộp: (1, 300, 6) gồm [x1, y1, x2, y2, score, class_id]
+          + Dạng gộp (Ultralytics RT-DETR): (1, 300, 6) gồm [cx, cy, w, h, score, class_id] chuẩn hóa [0, 1]
+            hoặc [x1, y1, x2, y2, score, class_id]
         - Lọc ngưỡng điểm tin cậy (Confidence Threshold).
-        - Ánh xạ tọa độ về khung hình gốc (loại trừ padding & scale).
+        - Ánh xạ tọa độ về khung hình gốc (orig_w, orig_h).
         """
         orig_w, orig_h = orig_size
-        scale_x, scale_y, pad_w, pad_h = pad_info
         detections = []
 
         if len(outputs) == 2:
@@ -143,7 +138,6 @@ class RTDETRInferenceEngine:
             class_ids = np.argmax(scores, axis=-1)
             confidences = np.max(scores, axis=-1)
 
-            # Lọc bằng boolean mask nhanh không dùng vòng lặp
             valid_mask = confidences >= CONFIDENCE_THRESHOLD
             valid_boxes = boxes[valid_mask]
             valid_scores = confidences[valid_mask]
@@ -165,21 +159,35 @@ class RTDETRInferenceEngine:
             return detections
 
         for box, score, cls_id in zip(valid_boxes, valid_scores, valid_classes):
-            # Chỉ chấp nhận class 0 = ngap_lut; bỏ mọi class khác nếu có
-            # (ví dụ model ONNX cũ vẫn còn nhiều class).
-            if int(cls_id) != 0:
+            cls_id_int = int(cls_id)
+            if cls_id_int not in CLASS_NAMES:
                 continue
 
-            x1, y1, x2, y2 = box
+            b0, b1, b2, b3 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
 
-            # Ánh xạ ngược tọa độ từ ảnh 640x640 đã padding về khung hình gốc của Client
-            real_x1 = max(0, int((x1 - pad_w) / scale_x))
-            real_y1 = max(0, int((y1 - pad_h) / scale_y))
-            real_x2 = min(orig_w, int((x2 - pad_w) / scale_x))
-            real_y2 = min(orig_h, int((y2 - pad_h) / scale_y))
+            # Kiểm tra xem tọa độ đang ở dạng chuẩn hóa [0, 1] (cx, cy, w, h của Ultralytics RT-DETR)
+            # hay dạng pixel [0, 640] (x1, y1, x2, y2)
+            if max(b0, b1, b2, b3) <= 1.5:
+                cx, cy, bw, bh = b0, b1, b2, b3
+                x1 = (cx - bw / 2.0) * orig_w
+                y1 = (cy - bh / 2.0) * orig_h
+                x2 = (cx + bw / 2.0) * orig_w
+                y2 = (cy + bh / 2.0) * orig_h
+            else:
+                x1 = b0 * (orig_w / INPUT_WIDTH)
+                y1 = b1 * (orig_h / INPUT_HEIGHT)
+                x2 = b2 * (orig_w / INPUT_WIDTH)
+                y2 = b3 * (orig_h / INPUT_HEIGHT)
 
-            cls_id_int = 0
-            label = CLASS_NAMES[cls_id_int]
+            real_x1 = max(0, min(orig_w, int(round(x1))))
+            real_y1 = max(0, min(orig_h, int(round(y1))))
+            real_x2 = max(0, min(orig_w, int(round(x2))))
+            real_y2 = max(0, min(orig_h, int(round(y2))))
+
+            if real_x2 <= real_x1 or real_y2 <= real_y1:
+                continue
+
+            label = CLASS_NAMES.get(cls_id_int, f"Class {cls_id_int}")
 
             detections.append({
                 "bbox": {
@@ -191,7 +199,7 @@ class RTDETRInferenceEngine:
                 "confidence": round(float(score), 4),
                 "class_id": cls_id_int,
                 "label": label,
-                "color": CLASS_COLORS.get(cls_id_int, "#10B981")
+                "color": CLASS_COLORS.get(cls_id_int, "#EF4444")
             })
 
         return detections
@@ -199,7 +207,7 @@ class RTDETRInferenceEngine:
     def predict(self, img_bgr: np.ndarray) -> Tuple[List[Dict], float]:
         t_start = time.perf_counter()
 
-        blob, orig_size, pad_info = self.preprocess(img_bgr)
+        blob, orig_size = self.preprocess(img_bgr)
 
         # Xây dựng input feed
         inputs_dict = {self.input_names[0]: blob}
@@ -211,7 +219,7 @@ class RTDETRInferenceEngine:
         outputs = self.session.run(self.output_names, inputs_dict)
 
         # Hậu xử lý trích xuất bounding boxes
-        results = self.postprocess(outputs, orig_size, pad_info)
+        results = self.postprocess(outputs, orig_size)
         inference_time_ms = round((time.perf_counter() - t_start) * 1000, 2)
 
         return results, inference_time_ms

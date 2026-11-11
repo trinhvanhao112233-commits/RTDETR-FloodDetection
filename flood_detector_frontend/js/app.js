@@ -458,13 +458,16 @@
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    let srcW = 0, srcH = 0;
-    if (state.activeTab === 'camera' || state.activeTab === 'video') {
-      srcW = el.videoElement.videoWidth;
-      srcH = el.videoElement.videoHeight;
-    } else {
-      srcW = el.previewImage.naturalWidth;
-      srcH = el.previewImage.naturalHeight;
+    let srcW = metadata?.frame_width || 0;
+    let srcH = metadata?.frame_height || 0;
+    if (!srcW || !srcH) {
+      if (state.activeTab === 'camera' || state.activeTab === 'video') {
+        srcW = el.videoElement.videoWidth;
+        srcH = el.videoElement.videoHeight;
+      } else {
+        srcW = el.previewImage.naturalWidth;
+        srcH = el.previewImage.naturalHeight;
+      }
     }
 
     if (!srcW || !srcH) return;
@@ -521,14 +524,24 @@
         const height = y2 - y1;
         if (width <= 0 || height <= 0) return;
 
-        // Vùng phủ bán trong suốt màu đỏ cảnh báo ngập
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
+        const boxColor = det.color || '#ef4444';
+
+        // Chuyển mã hex sang rgba cho vùng phủ bán trong suốt
+        let fillRgba = 'rgba(239, 68, 68, 0.22)';
+        if (boxColor.startsWith('#') && boxColor.length === 7) {
+          const r = parseInt(boxColor.slice(1, 3), 16);
+          const g = parseInt(boxColor.slice(3, 5), 16);
+          const b = parseInt(boxColor.slice(5, 7), 16);
+          fillRgba = `rgba(${r}, ${g}, ${b}, 0.22)`;
+        }
+
+        ctx.fillStyle = fillRgba;
         ctx.fillRect(x1, y1, width, height);
 
-        // Viền chính
-        ctx.strokeStyle = '#ef4444';
+        // Viền chính theo màu nhãn
+        ctx.strokeStyle = boxColor;
         ctx.lineWidth = 2;
-        ctx.shadowColor = 'rgba(239, 68, 68, 0.8)';
+        ctx.shadowColor = boxColor;
         ctx.shadowBlur = 10;
         ctx.strokeRect(x1, y1, width, height);
         ctx.shadowBlur = 0; // reset shadow
@@ -551,7 +564,8 @@
         // Nhãn phân loại & Confidence
         if (state.config.showLabels) {
           const confPercent = Math.round((det.confidence || 0) * 100);
-          const labelText = `NGẬP LỤT #${idx + 1} • ${confPercent}%`;
+          const rawLabel = det.label || 'NGẬP LỤT';
+          const labelText = `${rawLabel.toUpperCase()} #${idx + 1} • ${confPercent}%`;
 
           ctx.font = 'bold 12px "JetBrains Mono", Consolas, sans-serif';
           const textMetrics = ctx.measureText(labelText);
@@ -561,8 +575,8 @@
           let labelY = y1 - textH - 4;
           if (labelY < offsetY) labelY = y1 + 4;
 
-          // Nền nhãn đỏ nổi bật
-          ctx.fillStyle = '#ef4444';
+          // Nền nhãn theo màu của từng class
+          ctx.fillStyle = boxColor;
           ctx.beginPath();
           ctx.roundRect(x1, labelY, textW, textH, 4);
           ctx.fill();

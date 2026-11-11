@@ -35,7 +35,7 @@ def run_training():
         batch=8,             # RTX 3060 Ti (8GB VRAM) chạy mượt mà ở batch=8 (nếu thiếu VRAM giảm xuống 4)
         device=device_name,  # ID card đồ họa: 0
         workers=4,           # Đa luồng đọc dữ liệu
-        project="runs_flood",# Thư mục lưu kết quả thí nghiệm
+        project=os.path.join(current_dir, "runs_flood"), # Thư mục lưu kết quả thí nghiệm
         name="rtdetr_flood_exp",
         exist_ok=True,
         save=True,           # Tự động lưu checkpoint và best.pt
