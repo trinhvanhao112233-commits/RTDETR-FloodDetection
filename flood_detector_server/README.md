@@ -13,6 +13,8 @@ Mở PowerShell tại thư mục gốc dự án:
 
 Đặt checkpoint một lớp `flood` (ID 0) tại `flood_detector_server/best.pt`. Không cần export ONNX. Sau khi thay checkpoint, khởi động lại server.
 
+Repository kèm checkpoint amp-3 bằng Git LFS. Khi clone, dùng Git LFS để tải trọng số thực; nếu cần chạy `git lfs pull` tại thư mục gốc repository. File trọng số có dung lượng khoảng 66,2 MB, không phải file con trỏ LFS vài trăm byte.
+
 Mở http://localhost:8000/ để tải ảnh hoặc video lên phân tích. Giao diện hiện tại có hai tab Tệp Video và Ảnh Đơn. Backend vẫn giữ API camera/YouTube; riêng YouTube cần Internet và Node.js, luồng video được đọc vào bộ nhớ mà không lưu toàn bộ xuống đĩa.
 
 Kiểm tra http://localhost:8000/health. Khi dùng GPU, `device` là `cuda:0` và `gpu_name` cho biết tên GPU. Môi trường `.venv` hiện tại đã có PyTorch CUDA. Ở máy khác, nếu `torch.cuda.is_available()` trả về False, cần cài bản PyTorch phù hợp GPU/driver theo https://pytorch.org/get-started/locally/.

@@ -30,7 +30,10 @@ flowchart LR
 
 Dùng Python 3.11 trở lên. Môi trường phát triển hiện tại dùng Python 3.13.
 
+Cài Git và [Git LFS](https://git-lfs.com/) để tải checkpoint đi kèm repository.
+
 ```powershell
+git lfs install
 git clone https://github.com/trinhvanhao112233-commits/RTDETR-FloodDetection.git
 cd RTDETR-FloodDetection
 python -m venv .venv
@@ -57,7 +60,21 @@ Kiểm tra PyTorch đã nhận GPU:
 flood_detector_server/best.pt
 ```
 
-Checkpoint phải có đúng một lớp `flood` hoặc `Flood`, ID `0`. Dataset, checkpoint và môi trường ảo được lưu riêng, không kèm bản mã nguồn này. Nếu chưa có `best.pt`, hãy huấn luyện bằng notebook ở mục bên dưới hoặc sử dụng checkpoint đã được cung cấp riêng.
+Repository kèm [checkpoint best.pt của lượt amp-3](flood_detector_server/best.pt), được lưu bằng Git LFS, dung lượng khoảng 66,2 MB. Checkpoint có một lớp `flood`, ID `0`, với các chỉ số validation trình bày bên dưới.
+
+Nếu clone chưa tải được trọng số thực, chạy từ thư mục repository:
+
+```powershell
+git lfs pull
+```
+
+SHA256 của checkpoint đi kèm:
+
+```text
+f0cb1cdd1d8a03b5c22d6419ecd436b5e25678a9cb9096b770d1572c2cb75f0f
+```
+
+Bạn cũng có thể thay bằng mô hình RT-DETR đã huấn luyện riêng, có đúng một lớp `flood` hoặc `Flood`, ID `0`. Dataset và môi trường ảo được lưu riêng.
 
 ### 3. Chạy ứng dụng
 
@@ -163,4 +180,4 @@ RTDETR-FloodDetection/
 └── README.md
 ```
 
-Các thư mục dữ liệu cục bộ (`data/`, `New folder/`, `test_media/`), checkpoint, cache, báo cáo bảo trì và đầu ra thử nghiệm được bỏ qua bởi Git. Mã nguồn vẫn giữ các công cụ xuất ONNX cũ để tham khảo; server hiện tại nhận `.pt` trực tiếp.
+Các thư mục dữ liệu cục bộ (`data/`, `New folder/`, `test_media/`), các checkpoint khác, cache, báo cáo bảo trì và đầu ra thử nghiệm được bỏ qua bởi Git. Riêng `flood_detector_server/best.pt` được quản lý bằng Git LFS. Mã nguồn vẫn giữ các công cụ xuất ONNX cũ để tham khảo; server hiện tại nhận `.pt` trực tiếp.

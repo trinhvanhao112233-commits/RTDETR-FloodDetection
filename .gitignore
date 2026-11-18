@@ -14,6 +14,7 @@ flood_detector_server/.runtime/
 
 # PyTorch & Trọng số mô hình dung lượng lớn
 *.pt
+!/flood_detector_server/best.pt
 *.pth
 *.onnx
 *.engine
