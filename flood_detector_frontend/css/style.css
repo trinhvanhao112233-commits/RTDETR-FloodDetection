@@ -968,6 +968,14 @@ body {
 /* ==============================================================================
    RESPONSIVE DESIGN
    ============================================================================== */
+.source-selector { flex-wrap: wrap; }
+.sample-attribution { margin: 10px 0 0; font-size: 0.75rem; color: var(--text-muted); line-height: 1.5; }
+.sample-attribution a { color: var(--accent-cyan); }
+.youtube-controls { width: 100%; flex-direction: column; align-items: stretch; gap: 8px; }
+.youtube-input-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.youtube-input-row input { flex: 1; min-width: 200px; }
+#youtubeStatus { margin: 0; color: var(--text-muted); font-size: 0.82rem; overflow-wrap: anywhere; }
+
 @media (max-width: 768px) {
   .header {
     flex-direction: column;

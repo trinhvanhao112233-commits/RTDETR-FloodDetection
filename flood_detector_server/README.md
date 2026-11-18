@@ -1,55 +1,39 @@
-# Máy chủ suy luận nhận diện ngập lụt theo thời gian thực (RT-DETR + FastAPI + WebSockets)
+# Chạy nhận diện trực tiếp bằng best.pt
 
-Dự án cung cấp Inference Server hiệu năng cao phục vụ nhận diện ngập lụt (đường ngập, xe ngập,...) từ camera/video stream của ứng dụng client (Vue.js) gửi lên qua WebSocket.
+Server dùng Ultralytics RT-DETR và PyTorch để đọc checkpoint, tự chọn GPU CUDA nếu PyTorch nhận GPU; nếu không có GPU thì dùng CPU.
 
-## Cấu trúc thư mục
+## Khởi động trên máy hiện tại
 
-```text
-flood_detector_server/
-├── main.py                  # Mã nguồn server chính (FastAPI + WebSocket + ONNXRuntime)
-├── requirements.txt         # Danh sách thư viện phụ thuộc
-├── rt_detr_flood.onnx       # File trọng số mô hình ONNX (bạn copy vào đây)
-└── README.md                # Hướng dẫn chạy & triển khai
+Mở PowerShell tại thư mục gốc dự án:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r .\flood_detector_server\requirements.txt
+.\.venv\Scripts\python.exe .\flood_detector_server\main.py
 ```
 
-## 1. Cài đặt môi trường
+Đặt checkpoint một lớp `flood` (ID 0) tại `flood_detector_server/best.pt`. Không cần export ONNX. Sau khi thay checkpoint, khởi động lại server.
 
-Mở Terminal tại thư mục `flood_detector_server`:
+Mở http://localhost:8000/ để tải ảnh hoặc video lên phân tích. Giao diện hiện tại có hai tab Tệp Video và Ảnh Đơn. Backend vẫn giữ API camera/YouTube; riêng YouTube cần Internet và Node.js, luồng video được đọc vào bộ nhớ mà không lưu toàn bộ xuống đĩa.
 
-```bash
-# Tạo môi trường ảo (khuyến nghị)
-python -m venv venv
+Kiểm tra http://localhost:8000/health. Khi dùng GPU, `device` là `cuda:0` và `gpu_name` cho biết tên GPU. Môi trường `.venv` hiện tại đã có PyTorch CUDA. Ở máy khác, nếu `torch.cuda.is_available()` trả về False, cần cài bản PyTorch phù hợp GPU/driver theo https://pytorch.org/get-started/locally/.
 
-# Kích hoạt trên Windows:
-.\venv\Scripts\activate
+## Cấu hình tùy chọn
 
-# Cài đặt thư viện:
-pip install -r requirements.txt
+```powershell
+$env:MODEL_PATH = 'D:\models\best.pt'
+$env:MODEL_DEVICE = 'cuda:0'
+.\.venv\Scripts\python.exe .\flood_detector_server\main.py
 ```
 
-> **Lưu ý GPU:** Nếu máy chủ hoặc máy tính của bạn có card đồ họa rời NVIDIA và muốn tăng tốc tối đa, cài đặt bản GPU:
-> ```bash
-> pip uninstall onnxruntime -y
-> pip install onnxruntime-gpu
-> ```
+`MODEL_DEVICE` mặc định là `auto`; có thể đặt `cpu` để kiểm tra trên CPU. Nếu yêu cầu CUDA nhưng không khả dụng, server báo lỗi để tránh âm thầm dùng thiết bị khác.
 
-## 2. Chuẩn bị Model
+## Các endpoint
 
-Đặt file mô hình **`rt_detr_flood.onnx`** vào thẳng trong thư mục `flood_detector_server/`.  
-Hoặc thiết lập biến môi trường nếu mô hình ở nơi khác:
-```bash
-set MODEL_PATH="D:\models\rt_detr_flood.onnx"
-```
+- `POST /api/detect`: ảnh multipart với trường `file`, hoặc raw bytes.
+- `WS /ws/flood-detection`: khung hình camera/video.
+- `WS /ws/youtube-detection`: nguồn YouTube.
+- `GET /health`: checkpoint, runtime và thiết bị đang dùng.
 
-## 3. Khởi chạy Server
+Giao diện chỉ vẽ box và kích hoạt cảnh báo với dự đoán đạt ngưỡng tin cậy đã chọn. Dự đoán dưới ngưỡng không vẽ lên ảnh/video; điểm cao nhất vẫn được hiển thị trong bảng chỉ số.
 
-```bash
-python main.py
-```
-Hoặc dùng uvicorn trực tiếp:
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-- Endpoint WebSocket: `ws://localhost:8000/ws/flood-detection`
-- Health check: `http://localhost:8000/health`
+Các file ONNX cũ vẫn có thể được lưu để tham khảo; server hiện tại chỉ nhận checkpoint `.pt`.

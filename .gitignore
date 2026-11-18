@@ -10,6 +10,7 @@ venv/
 env/
 ENV/
 .venv/
+flood_detector_server/.runtime/
 
 # PyTorch & Trọng số mô hình dung lượng lớn
 *.pt
@@ -24,14 +25,32 @@ flood_experiments/
 *.log
 
 # Dữ liệu ảnh training (tránh đẩy dataset nặng lên git)
-flood_dataset.zip
-flood_training/flood_dataset/images/
-flood_training/flood_dataset/labels/
+*.zip
+/data/
+/New folder/
+/puddle detection.v32-640pure.yolov8/
+/test_media/
+/maintenance/
+/flood_training/flood_dataset/
+/flood_training/evaluation_*/
+/flood_training/model_comparison/
+/flood_training/review_amp3/
+/flood_detector_server/active_model.json
 
 # Models
-flood_detector_server/rt_detr_flood.oonx
-rtdetr-l.oonx
-rtdetr-l.pt
+*.oonx
+*.mp4
+*.webm
+*.avi
+*.mov
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
 
 # IDE & OS
 .vscode/

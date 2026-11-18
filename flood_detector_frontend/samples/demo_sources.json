@@ -1,0 +1,29 @@
+{
+  "source": "Flood v2, Roboflow user b23dccn284s-workspace-jmm7j",
+  "source_url": "https://universe.roboflow.com/b23dccn284s-workspace-jmm7j/flood-yia9a/dataset/2",
+  "license": "CC BY 4.0 (as declared in source dataset README)",
+  "modified": false,
+  "note": "Images copied from local dataset test split for UI demonstration; not an independent evaluation set.",
+  "images": [
+    {
+      "file": "demo_urban_flood_traffic.jpg",
+      "original_file": "New folder\\Flood.v2i.yolov8\\test\\images\\-2025-02-04-153628_png.rf.8d53f7b17d33edfdd5c186a14cf6d3a9.jpg",
+      "sha256": "db694843018d2ba471b32567152bed308bda0d2c34a985f9c800a3c6d20c3d16"
+    },
+    {
+      "file": "demo_urban_flood_shops.jpg",
+      "original_file": "New folder\\Flood.v2i.yolov8\\test\\images\\-2025-02-04-153028_png.rf.c703a7ab5fc3165ecc8448cd299cfba0.jpg",
+      "sha256": "412fc144838a0f1a097b69f914971594c6fd96b2536a49b40ad0c593d64657b6"
+    },
+    {
+      "file": "demo_urban_flood_motorbikes.jpg",
+      "original_file": "New folder\\Flood.v2i.yolov8\\test\\images\\2348_jpg.rf.ddc899754c2ba83cc170debafb64e78a.jpg",
+      "sha256": "52a645624fba4ce347ab8c3beb1a59db70814c8c1a88f46e968b296f5a5815a0"
+    },
+    {
+      "file": "demo_urban_road_clear.jpg",
+      "original_file": "New folder\\Flood.v2i.yolov8\\test\\images\\output_98_jpg.rf.c2d43c41f00078b5fac9ceee360e5381.jpg",
+      "sha256": "4fc29ab20fa72271d614a5af06629aad5af2fd15703a6e6e8e11e45bee863178"
+    }
+  ]
+}

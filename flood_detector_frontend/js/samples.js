@@ -5,23 +5,30 @@
 window.SAMPLE_DATASETS = [
   {
     id: "sample_1",
-    title: "Mẫu 1: Ngập lụt đường phố",
-    description: "Khu vực mặt đường ngập nước ảnh hưởng xe máy và người dân",
-    image: "samples/sample_flood_1.jpg",
-    expected: "Phát hiện vùng ngập"
+    title: "Đường ngập có ô tô lưu thông",
+    description: "Ảnh thực tế: nước phủ lòng đường đô thị, ô tô và người đi bộ di chuyển qua vùng ngập.",
+    image: "samples/demo_urban_flood_traffic.jpg",
+    expected: "Có dấu hiệu ngập lụt"
   },
   {
     id: "sample_2",
-    title: "Mẫu 2: Ngập sâu ven đường",
-    description: "Nước ngập mép lề đường và lòng đường lưu thông",
-    image: "samples/sample_flood_2.jpg",
-    expected: "Phát hiện vùng ngập"
+    title: "Ngập trước dãy cửa hàng",
+    description: "Ảnh thực tế: nước tràn trên tuyến phố có cửa hàng và xe đỗ ven đường.",
+    image: "samples/demo_urban_flood_shops.jpg",
+    expected: "Có dấu hiệu ngập lụt"
   },
   {
     id: "sample_3",
-    title: "Mẫu 3: Nước ngập diện rộng",
-    description: "Tình huống mưa lớn khiến nước dâng ngập mặt đường",
-    image: "samples/sample_flood_3.jpg",
-    expected: "Phát hiện vùng ngập"
+    title: "Ô tô, xe máy qua đường ngập",
+    description: "Ảnh thực tế: người dân và nhiều loại phương tiện cùng di chuyển trên đường ngập.",
+    image: "samples/demo_urban_flood_motorbikes.jpg",
+    expected: "Có dấu hiệu ngập lụt"
+  },
+  {
+    id: "sample_4",
+    title: "Đường khô — kiểm tra báo nhầm",
+    description: "Ảnh đường phố có xe máy, không thấy vùng ngập; dùng để kiểm tra khả năng báo nhầm.",
+    image: "samples/demo_urban_road_clear.jpg",
+    expected: "Chưa phát hiện dấu hiệu ngập lụt"
   }
 ];

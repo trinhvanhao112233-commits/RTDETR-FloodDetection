@@ -1,150 +1,166 @@
-# 🌊 Hệ Thống Cảnh Báo Ngập Lụt Thông Minh Thời Gian Thực (RT-DETR + FastAPI + WebSockets)
+﻿# RTDETR-FloodDetection
 
-Dự án cung cấp giải pháp toàn diện cho bài toán **Nhận diện và Cảnh báo ngập lụt theo thời gian thực (Real-time Flood Detection)**, bao gồm:
-1. **Pipeline huấn luyện (Training Pipeline)**: Huấn luyện mô hình thị giác tiên tiến **RT-DETR (Real-Time DEtection TRansformer)** tối ưu hóa tăng tốc trên GPU NVIDIA RTX.
-2. **Máy chủ suy luận (Inference Server)**: Backend FastAPI hiệu năng cao, kết nối thời gian thực qua **WebSockets**, suy luận ảnh trực tiếp trong bộ nhớ RAM qua **ONNXRuntime** đạt FPS cao.
+Ứng dụng nhận diện **dấu hiệu ngập lụt trên đường phố đô thị** bằng RT-DETR, Ultralytics và PyTorch. Backend FastAPI xử lý ảnh/video và trả tọa độ vùng nghi ngập cùng độ tin cậy để giao diện vẽ bounding box.
 
----
+Mô hình có một lớp: **`0 = flood`**. Kết quả thể hiện dấu hiệu ngập, không xác định độ sâu nước hay mức độ nguy hiểm.
 
-## 📁 Cấu trúc dự án
+## Chức năng hiện tại
 
-```text
-├── flood_detector_frontend/       # Giao diện web cảnh báo ngập lụt (Vue.js, WebSocket & Canvas HUD)
-│   ├── index.html                 # Trang web chính (chạy trực tiếp hoặc qua server)
-│   ├── css/style.css              # Giao diện Cyberpunk & Command Center HUD
-│   ├── js/app.js                  # Logic kết nối WebSocket, xử lý Camera/Video, vẽ Bounding Box
-│   └── samples/                   # Các ảnh mẫu kiểm thử ngập lụt thực tế
-├── flood_detector_server/         # Máy chủ suy luận thời gian thực (FastAPI & ONNX)
-│   ├── main.py                    # Server FastAPI, WebSocket endpoint & ONNX Engine
-│   ├── requirements.txt           # Danh sách thư viện phụ thuộc của server
-│   ├── rt_detr_flood.onnx         # File mô hình ONNX (được export sau khi train)
-│   └── README.md                  # Hướng dẫn chi tiết chạy máy chủ
-│
-├── flood_training/                # Bộ công cụ huấn luyện mô hình với PyTorch & GPU
-│   ├── flood_dataset/
-│   │   ├── data.yaml              # Cấu hình dataset và các nhãn class
-│   │   ├── images/ (train, val)   # Thư mục chứa ảnh huấn luyện & validation
-│   │   └── labels/ (train, val)   # Thư mục chứa file nhãn .txt (chuẩn YOLO)
-│   ├── train.py                   # Script tự động huấn luyện RT-DETR trên GPU
-│   ├── export.py                  # Script chuyển đổi .pt sang .onnx và copy sang server
-│   └── README.md                  # Hướng dẫn huấn luyện & nạp dữ liệu
-│
-├── .gitignore                     # Cấu hình loại trừ file nặng, checkpoint, cache
-└── README.md                      # Tài liệu tổng quan dự án
+- Tải ảnh JPG, PNG hoặc WebP để phân tích.
+- Tải video MP4, WebM hoặc OGG; hỗ trợ phát, tạm dừng, tua, tốc độ và lặp.
+- Chạy trực tiếp checkpoint `best.pt`; tự chọn GPU CUDA khi PyTorch nhận GPU, nếu không sẽ dùng CPU.
+- Hiển thị box và nhãn khi confidence đạt ngưỡng người dùng chọn.
+- Dự đoán dưới ngưỡng không vẽ box; điểm cao nhất vẫn hiển thị trong bảng chỉ số.
+- Hiển thị FPS xử lý, độ trễ, số vùng phát hiện, lưu snapshot và xuất nhật ký CSV.
+- Giao diện phục vụ trực tiếp từ FastAPI, không cần chạy frontend bằng npm.
+
+```mermaid
+flowchart LR
+    A[Ảnh hoặc video tải lên] --> B[Giao diện lấy khung hình]
+    B --> C[FastAPI / WebSocket]
+    C --> D[RT-DETR best.pt]
+    D --> E[Box và confidence]
+    E --> F[Lọc theo ngưỡng]
+    F --> G[Hiển thị và cảnh báo]
 ```
 
----
+## Cài đặt
 
-## 🏷️ Các nhãn nhận diện (Classes & Mức độ cảnh báo)
+### 1. Clone repository và tạo môi trường
 
-0:ngap_lut
+Dùng Python 3.11 trở lên. Môi trường phát triển hiện tại dùng Python 3.13.
 
----
+```powershell
+git clone https://github.com/trinhvanhao112233-commits/RTDETR-FloodDetection.git
+cd RTDETR-FloodDetection
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+```
 
-## 🚀 Hướng dẫn nhanh (Quick Start)
+Nếu dùng GPU NVIDIA, cài bản PyTorch/CUDA phù hợp theo [hướng dẫn PyTorch](https://pytorch.org/get-started/locally/) vào môi trường `.venv`, sau đó cài các thư viện của server:
 
-### Phần 1: Huấn luyện mô hình (Training)
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r .\flood_detector_server\requirements.txt
+```
 
-#### Cách 1: Huấn luyện cục bộ (Local GPU RTX 3060 Ti)
-1. **Chuẩn bị dữ liệu**:
-   - Copy ảnh vào: `flood_training/flood_dataset/images/train/` và `images/val/`.
-   - Copy file nhãn `.txt` tương ứng vào: `flood_training/flood_dataset/labels/train/` và `labels/val/`.
+Kiểm tra PyTorch đã nhận GPU:
 
-2. **Chạy huấn luyện**:
-   ```bash
-   cd flood_training
-   python train.py
-   ```
-   *(Mô hình mặc định là `rtdetr-l.pt`, batch size = 8, image size = 640x640).*
+```powershell
+.\.venv\Scripts\python.exe -c "import torch; print('CUDA:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
 
-3. **Xuất mô hình sang ONNX**:
-   ```bash
-   python export.py
-   ```
-   Script sẽ tự động tối ưu hóa đồ thị ONNX (`simplify=True`, `opset=16`) và tự động chép file `rt_detr_flood.onnx` sang thư mục `flood_detector_server/`.
+### 2. Chuẩn bị checkpoint
 
----
+Đặt mô hình RT-DETR đã huấn luyện tại:
 
-#### Cách 2: Huấn luyện miễn phí trên Kaggle (GPU T4 x2 / P100 - 16GB VRAM)
+```text
+flood_detector_server/best.pt
+```
 
-Nếu muốn tận dụng tài nguyên đám mây hoặc train batch size lớn hơn (`batch=16`):
-1. **Nén dataset**: Nén thư mục `flood_dataset` thành file `flood_dataset.zip`.
-2. **Tạo Dataset trên Kaggle**:
-   - Truy cập [Kaggle Datasets](https://www.kaggle.com/datasets) -> Chọn **New Dataset** -> Upload file zip lên.
-3. **Tạo Notebook trên Kaggle**:
-   - Nhấn **New Notebook**.
-   - Vào menu bên phải **Notebook Options** -> **Accelerator** -> Chọn **GPU T4 x2** (hoặc **GPU P100**).
-   - Bật **Internet: On**.
-   - Upload file notebook [train_kaggle.ipynb](file:///f:/Nam4/Phát%20triển%20hệ%20thống%20thông%20minh/flood_training/train_kaggle.ipynb) có sẵn trong thư mục `flood_training/` lên Kaggle.
-4. **Chạy huấn luyện**:
-   - Nhấn **Run All**. Notebook sẽ tự động tải Ultralytics, nạp GPU và train 100 epochs.
-5. **Tải file ONNX về máy**:
-   - Sau khi cell cuối cùng chạy xong, ở thanh bên phải phần **Output**, click vào file **`rt_detr_flood.onnx`** và chọn **Download**.
-   - Bỏ file này vào thư mục `flood_detector_server/` trên máy tính là xong!
+Checkpoint phải có đúng một lớp `flood` hoặc `Flood`, ID `0`. Dataset, checkpoint và môi trường ảo được lưu riêng, không kèm bản mã nguồn này. Nếu chưa có `best.pt`, hãy huấn luyện bằng notebook ở mục bên dưới hoặc sử dụng checkpoint đã được cung cấp riêng.
 
----
+### 3. Chạy ứng dụng
 
-### Phần 2: Chạy Máy Chủ Suy Luận (Inference Server)
+Chạy từ thư mục gốc repository:
 
-1. **Cài đặt thư viện**:
-   ```bash
-   cd flood_detector_server
-   pip install -r requirements.txt
-   ```
+```powershell
+.\.venv\Scripts\python.exe .\flood_detector_server\main.py
+```
 
-2. **Khởi động Server**:
-   ```bash
-   python main.py
-   ```
-   Server sẽ lắng nghe tại cổng `http://0.0.0.0:8000`.
+Mở **http://localhost:8000/**. Chọn **Tệp Video** hoặc **Ảnh Đơn** để phân tích. Giữ terminal mở; nhấn `Ctrl + C` để dừng.
 
-3. **Giao tiếp WebSocket Real-Time**:
-   - **Endpoint WebSocket**: `ws://localhost:8000/ws/flood-detection`
-   - **Health check**: `http://localhost:8000/health`
-   - Hỗ trợ client (Vue.js / React / Mobile) gửi frame dạng **Binary (Blob/ArrayBuffer)** hoặc **Base64**.
-   - Định dạng dữ liệu server phản hồi:
-     ```json
-     {
-       "status": "success",
-       "timestamp": 1729783920.12,
-       "latency_ms": 28.5,
-       "fps": 35.1,
-       "detections": [
-         {
-           "bbox": { "x_min": 120, "y_min": 240, "x_max": 480, "y_max": 590 },
-           "confidence": 0.8921,
-           "class_id": 1,
-           "label": "xe_ngap",
-           "color": "#EF4444"
-         }
-       ],
-       "metadata": {
-         "frame_width": 1280,
-         "frame_height": 720,
-         "objects_count": 1
-       }
-     }
-     ```
----
+Để chạy bằng cổng khác:
 
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn main:app --app-dir flood_detector_server --host 127.0.0.1 --port 8001
+```
 
----
+Khi đó mở **http://127.0.0.1:8001/**. Sau khi cập nhật giao diện, nhấn `Ctrl + F5` để tải lại JavaScript.
 
-### Phần 3: Chạy Giao Diện Web Frontend (AQUA-GUARD Web)
+## Chọn thiết bị và checkpoint
 
-Bạn có thể chạy giao diện bằng 1 trong các cách sau:
-1. **Truy cập trực tiếp qua Server**: Sau khi chạy python main.py ở server, mở trình duyệt vào ngay:
-   👉 **http://localhost:8000/** (Server đã mount sẵn giao diện web)
-2. **Mở trực tiếp file HTML**: Nhấp đúp chuột vào file lood_detector_frontend/index.html trong bất kỳ trình duyệt nào.
-3. **Môi trường Vite (dành cho lập trình viên)**:
-   `ash
-   cd flood_detector_frontend
-   npm install
-   npm run dev
-   `
+Thiết lập biến môi trường trong PowerShell trước khi chạy server:
 
-## 🛠️ Công nghệ sử dụng
-- **AI Core**: [Ultralytics RT-DETR](https://docs.ultralytics.com/models/rtdetr/), PyTorch with CUDA 12.4.
-- **Inference Runtime**: Microsoft ONNXRuntime (CPU / CUDA Execution Provider).
-- **Backend**: FastAPI, Uvicorn (ASGI), WebSockets.
-- **Image Processing**: OpenCV (headless), NumPy (Zero-Disk I/O).
+```powershell
+$env:MODEL_PATH = 'D:\models\best.pt'
+$env:MODEL_DEVICE = 'cuda:0'
+.\.venv\Scripts\python.exe .\flood_detector_server\main.py
+```
+
+- `MODEL_PATH`: đường dẫn checkpoint `.pt`; mặc định là `flood_detector_server/best.pt`.
+- `MODEL_DEVICE`: mặc định `auto`; nhận `cpu` hoặc `cuda:0`.
+- Khởi động lại server sau khi thay checkpoint.
+
+Mở `/health` để xác nhận `model_loaded`, `device`, `gpu_name` và `model_path`. Có GPU trong máy chưa bảo đảm PyTorch đã nhận CUDA.
+
+## Ngưỡng tin cậy và FPS
+
+Ngưỡng mặc định là **45%**. Tăng ngưỡng có thể giảm báo nhầm nhưng cũng tăng bỏ sót. Confidence là điểm của từng dự đoán, không phải độ chính xác của cả mô hình.
+
+Ví dụ, khi ngưỡng là 85%, dự đoán 90% được vẽ box và có thể kích hoạt cảnh báo; dự đoán 70% chỉ còn điểm trong bảng chỉ số.
+
+FPS Limit là số khung hình tối đa giao diện gửi trong một giây. Code đợi kết quả khung trước rồi mới gửi tiếp, nên FPS phân tích thực tế còn phụ thuộc thiết bị, độ trễ và nguồn video. FPS xử lý AI khác FPS gốc của video.
+
+## Huấn luyện trên Kaggle
+
+Xem [hướng dẫn huấn luyện](flood_training/README.md).
+
+| Notebook | Mục đích |
+| --- | --- |
+| [train_kaggle.ipynb](flood_training/train_kaggle.ipynb) | Huấn luyện một lớp flood từ pretrained RT-DETR-L |
+| [finetune_kaggle.ipynb](flood_training/finetune_kaggle.ipynb) | Học thêm dữ liệu từ checkpoint cũ, kiểm tra và gộp dữ liệu trước khi train |
+
+Bật GPU và Internet trên Kaggle, thêm dữ liệu vào Input và điền đúng đường dẫn. Với fine-tune, dùng đúng checkpoint ban đầu và kiểm tra SHA256 trong notebook. Giữ train/validation/test tách biệt theo nguồn hoặc video, tránh các khung hình gần nhau xuất hiện ở nhiều tập.
+
+Ảnh ngập cần bounding box hoặc polygon YOLO. Ảnh không ngập có file nhãn rỗng; nên bao gồm đường khô, đường ướt và vũng nước để kiểm tra báo nhầm.
+
+## Kết quả validation tham khảo
+
+Lượt `rtdetr_flood_only_amp-3` chạy 80 epoch. Epoch tốt nhất theo mAP@50–95 trong CSV là **75**:
+
+| Precision | Recall | mAP@50 | mAP@50–95 |
+| ---: | ---: | ---: | ---: |
+| 96,66% | 95,64% | 97,42% | 88,01% |
+
+Nguồn: [lịch sử 80 epoch](docs/metrics/amp3_results.csv). Đây là kết quả trên validation của lượt train, chưa chứng minh độ chính xác trên video đường phố độc lập và không dùng để so sánh công bằng với lượt train có validation khác.
+
+![Diễn biến huấn luyện amp-3](docs/figures/amp3_training.png)
+
+## API
+
+| Endpoint | Chức năng |
+| --- | --- |
+| `GET /` | Giao diện web |
+| `GET /health` | Trạng thái mô hình và thiết bị |
+| `POST /api/detect` | Phân tích ảnh, multipart field `file` hoặc raw body |
+| `WS /ws/flood-detection` | Nhận khung hình JPEG và trả kết quả |
+| `WS /ws/youtube-detection` | API đọc luồng YouTube; không có tab YouTube trên giao diện hiện tại |
+
+Endpoint YouTube bổ sung cần Internet và Node.js; việc đọc nguồn công khai còn phụ thuộc khả năng truy cập video. Luồng này không lưu toàn bộ video xuống máy.
+
+Ví dụ gọi API ảnh bằng PowerShell:
+
+```powershell
+curl.exe -X POST http://localhost:8000/api/detect -F "file=@C:\images\road.jpg"
+```
+
+Kết quả gồm `detections`, `candidates`, `flood_detected`, `latency_ms` và `metadata`. API dùng ngưỡng mặc định 0,45 cho `detections`; giao diện dùng `candidates` để áp dụng ngưỡng người dùng chọn.
+
+## Cấu trúc mã nguồn
+
+```text
+RTDETR-FloodDetection/
+├── flood_detector_frontend/       # HTML, CSS, JavaScript
+├── flood_detector_server/
+│   ├── main.py                   # FastAPI, REST và WebSocket
+│   ├── pytorch_engine.py         # Nạp best.pt, suy luận CPU/CUDA
+│   ├── detection_result.py       # Tách dự đoán và kết quả đạt ngưỡng
+│   ├── youtube_stream.py         # Đọc khung hình YouTube qua API
+│   └── requirements.txt
+├── flood_training/               # Notebook và công cụ huấn luyện/đánh giá
+├── docs/                         # Biểu đồ và số liệu validation tham khảo
+├── .gitignore
+└── README.md
+```
+
+Các thư mục dữ liệu cục bộ (`data/`, `New folder/`, `test_media/`), checkpoint, cache, báo cáo bảo trì và đầu ra thử nghiệm được bỏ qua bởi Git. Mã nguồn vẫn giữ các công cụ xuất ONNX cũ để tham khảo; server hiện tại nhận `.pt` trực tiếp.

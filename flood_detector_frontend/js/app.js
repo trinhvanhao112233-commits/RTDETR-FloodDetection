@@ -38,11 +38,15 @@
     serverHealth: {
       online: false,
       modelLoaded: false,
-      providers: []
+      providers: [],
+      runtime: '',
+      device: '',
+      gpuName: ''
     },
 
-    // Chế độ nguồn dữ liệu: 'camera' | 'video' | 'image' | 'samples'
-    activeTab: 'camera',
+    // Chế độ nguồn dữ liệu: 'camera' | 'video' | 'youtube' | 'image' | 'samples'
+    activeTab: 'video',
+    youtubeWs: null,
 
     // Camera Stream
     cameraStream: null,
@@ -68,6 +72,8 @@
     floodDetected: false,
     floodStatus: 'khong_ngap_lut',
     detections: [],
+    displayDetections: [],
+    maxConfidence: null,
     currentLatency: 0,
     currentFps: 0,
     clientFps: 0,
@@ -126,7 +132,6 @@
     // Alert Banner
     el.alertBanner = document.getElementById('alertBanner');
     el.alertBannerTitle = document.getElementById('alertBannerTitle');
-    el.alertBannerSubtitle = document.getElementById('alertBannerSubtitle');
     el.alertBannerIcon = document.getElementById('alertBannerIcon');
 
     // Controls
@@ -134,6 +139,11 @@
     el.videoControls = document.getElementById('videoControls');
     el.imageControls = document.getElementById('imageControls');
     el.sampleControls = document.getElementById('sampleControls');
+    el.youtubeControls = document.getElementById('youtubeControls');
+    el.youtubeUrl = document.getElementById('youtubeUrl');
+    el.youtubeStatus = document.getElementById('youtubeStatus');
+    el.btnStartYoutube = document.getElementById('btnStartYoutube');
+    el.btnStopYoutube = document.getElementById('btnStopYoutube');
 
     el.cameraSelect = document.getElementById('cameraSelect');
     el.btnStartCamera = document.getElementById('btnStartCamera');
@@ -255,7 +265,8 @@
       };
 
       state.ws.onmessage = (event) => {
-        handleServerMessage(event.data);
+        if (state.activeTab !== 'youtube') handleServerMessage(event.data);
+        else isSendingFrame = false;
       };
 
       state.ws.onerror = (err) => {
@@ -283,6 +294,7 @@
   }
 
   function disconnectWebSocket() {
+    stopYoutube();
     clearTimeout(state.reconnectTimer);
     if (state.ws) {
       state.ws.close();
@@ -301,6 +313,9 @@
         state.serverHealth.online = true;
         state.serverHealth.modelLoaded = data.model_loaded;
         state.serverHealth.providers = data.providers || [];
+        state.serverHealth.runtime = data.runtime || '';
+        state.serverHealth.device = data.device || '';
+        state.serverHealth.gpuName = data.gpu_name || '';
         updateStatusUI();
       }
     } catch (e) {
@@ -330,17 +345,11 @@
       state.latencyHistory.push(state.currentLatency);
       if (state.latencyHistory.length > 30) state.latencyHistory.shift();
 
-      // Lọc detections theo ngưỡng confidence tùy chỉnh của người dùng
-      const rawDetections = payload.detections || [];
-      const filteredDetections = rawDetections.filter(
-        d => (d.confidence || 0) >= state.config.confidenceThreshold
-      );
-
-      state.detections = filteredDetections;
-      state.floodDetected = filteredDetections.length > 0;
-      state.floodStatus = state.floodDetected ? 'ngap_lut' : 'khong_ngap_lut';
+      updateDetectionState(payload);
       state.lastDetectionResult = payload;
 
+      // Draw the current boxes before capturing an incident snapshot.
+      renderHUD(payload.metadata);
       if (state.floodDetected) {
         state.floodFramesCount++;
         playAlertSound();
@@ -348,7 +357,6 @@
       }
 
       // Render lại giao diện & HUD
-      renderHUD(payload.metadata);
       updateTelemetryUI();
       updateBannerUI();
       drawSparkline();
@@ -357,6 +365,17 @@
     } finally {
       isSendingFrame = false; // Cho phép gửi frame tiếp theo
     }
+  }
+
+  function updateDetectionState(payload) {
+    const candidates = [...(payload.candidates || payload.detections || [])]
+      .filter(d => Number.isFinite(d.confidence))
+      .sort((a, b) => b.confidence - a.confidence);
+    state.maxConfidence = candidates.length ? candidates[0].confidence : null;
+    state.detections = candidates.filter(d => d.confidence >= state.config.confidenceThreshold);
+    state.displayDetections = state.detections;
+    state.floodDetected = state.detections.length > 0;
+    state.floodStatus = state.floodDetected ? 'ngap_lut' : 'khong_ngap_lut';
   }
 
   // ==============================================================================
@@ -493,7 +512,6 @@
     const scaleX = renderW / srcW;
     const scaleY = renderH / srcH;
 
-    // Vẽ tâm ngắm công nghệ cao (Crosshairs) nếu bật
     if (state.config.showCrosshair && state.floodDetected) {
       ctx.save();
       ctx.strokeStyle = 'rgba(239, 68, 68, 0.3)';
@@ -512,8 +530,8 @@
     }
 
     // Vẽ từng Bounding Box
-    if (state.config.showBbox && state.detections.length > 0) {
-      state.detections.forEach((det, idx) => {
+    if (state.displayDetections.length > 0) {
+      state.displayDetections.filter(det => det.confidence >= state.config.confidenceThreshold).forEach((det, idx) => {
         const bbox = det.bbox;
         const x1 = Math.round(bbox.x_min * scaleX + offsetX);
         const y1 = Math.round(bbox.y_min * scaleY + offsetY);
@@ -525,8 +543,6 @@
         if (width <= 0 || height <= 0) return;
 
         const boxColor = det.color || '#ef4444';
-
-        // Chuyển mã hex sang rgba cho vùng phủ bán trong suốt
         let fillRgba = 'rgba(239, 68, 68, 0.22)';
         if (boxColor.startsWith('#') && boxColor.length === 7) {
           const r = parseInt(boxColor.slice(1, 3), 16);
@@ -562,15 +578,16 @@
         ctx.stroke();
 
         // Nhãn phân loại & Confidence
-        if (state.config.showLabels) {
-          const confPercent = Math.round((det.confidence || 0) * 100);
-          const rawLabel = det.label || 'NGẬP LỤT';
-          const labelText = `${rawLabel.toUpperCase()} #${idx + 1} • ${confPercent}%`;
+        {
+          const confPercent = ((det.confidence || 0) * 100).toFixed(1);
+          const rawLabel = 'DẤU HIỆU NGẬP';
+          const labelText = `${rawLabel} #${idx + 1} • ${confPercent}%`;
 
           ctx.font = 'bold 12px "JetBrains Mono", Consolas, sans-serif';
           const textMetrics = ctx.measureText(labelText);
           const textW = textMetrics.width + 16;
           const textH = 22;
+          const labelX = Math.max(offsetX, Math.min(x1, offsetX + renderW - textW));
 
           let labelY = y1 - textH - 4;
           if (labelY < offsetY) labelY = y1 + 4;
@@ -578,13 +595,13 @@
           // Nền nhãn theo màu của từng class
           ctx.fillStyle = boxColor;
           ctx.beginPath();
-          ctx.roundRect(x1, labelY, textW, textH, 4);
+          ctx.roundRect(labelX, labelY, textW, textH, 4);
           ctx.fill();
 
           // Chữ nhãn
           ctx.fillStyle = '#ffffff';
           ctx.textBaseline = 'middle';
-          ctx.fillText(labelText, x1 + 8, labelY + textH / 2);
+          ctx.fillText(labelText, labelX + 8, labelY + textH / 2);
         }
       });
     }
@@ -746,33 +763,31 @@
     }
 
     if (state.serverHealth.modelLoaded) {
-      const provider = state.serverHealth.providers.includes('CUDAExecutionProvider') ? 'GPU (CUDA)' : 'CPU';
-      el.modelStatusBadge.textContent = `RT-DETR • ${provider}`;
+      const provider = state.serverHealth.device.startsWith('cuda')
+        ? 'GPU (CUDA)' : 'CPU';
+      el.modelStatusBadge.textContent = `RT-DETR • best.pt • ${provider}`;
+      el.modelStatusBadge.title = `${state.serverHealth.runtime} • ${state.serverHealth.gpuName || state.serverHealth.device}`;
       el.modelStatusBadge.className = 'badge-tech text-cyan';
     } else {
-      el.modelStatusBadge.textContent = `Chờ nạp Model .ONNX`;
+      el.modelStatusBadge.textContent = `Chờ nạp best.pt`;
       el.modelStatusBadge.className = 'badge-tech text-warning';
     }
   }
 
   function updateBannerUI() {
-    if (!state.isStreaming && state.activeTab === 'camera') {
+    if (!state.lastDetectionResult) {
       el.alertBanner.className = 'alert-banner idle';
       el.alertBannerTitle.textContent = 'HỆ THỐNG ĐANG CHỜ KHỞI CHẠY';
-      el.alertBannerSubtitle.textContent = 'Nhấn "Bật Camera" hoặc chọn Video/Ảnh để bắt đầu giám sát thời gian thực.';
       el.viewportCard.classList.remove('alert-mode');
       return;
     }
-
     if (state.floodDetected) {
       el.alertBanner.className = 'alert-banner danger';
-      el.alertBannerTitle.textContent = `⚠️ CẢNH BÁO: PHÁT HIỆN ${state.detections.length} VÙNG NGẬP LỤT NGUY HIỂM!`;
-      el.alertBannerSubtitle.textContent = `Mặt đường có dấu hiệu ngập sâu, phương tiện di chuyển có nguy cơ chết máy hoặc tai nạn.`;
+      el.alertBannerTitle.textContent = '⚠️ CÓ DẤU HIỆU NGẬP LỤT';
       el.viewportCard.classList.add('alert-mode');
     } else {
       el.alertBanner.className = 'alert-banner safe';
-      el.alertBannerTitle.textContent = '🛡️ MẶT ĐƯỜNG AN TOÀN - KHÔNG PHÁT HIỆN NGẬP';
-      el.alertBannerSubtitle.textContent = 'Tuyến đường khô ráo hoặc ướt mưa nhẹ, giao thông lưu thông bình thường.';
+      el.alertBannerTitle.textContent = 'CHƯA PHÁT HIỆN DẤU HIỆU NGẬP LỤT';
       el.viewportCard.classList.remove('alert-mode');
     }
   }
@@ -781,11 +796,10 @@
     el.telemetryFps.textContent = `${state.clientFps || state.currentFps} FPS`;
     el.telemetryLatency.textContent = `${state.currentLatency} ms`;
     el.telemetryCount.textContent = state.detections.length;
+    el.telemetryMaxConf.textContent = state.maxConfidence !== null
+      ? `${(state.maxConfidence * 100).toFixed(1)}%` : '—';
 
     if (state.detections.length > 0) {
-      const maxConf = Math.round(Math.max(...state.detections.map(d => d.confidence || 0)) * 100);
-      el.telemetryMaxConf.textContent = `${maxConf}%`;
-
       // Ước lượng tỷ lệ diện tích ngập
       let totalBboxArea = 0;
       let totalImgArea = (state.lastDetectionResult?.metadata?.frame_width || 640) *
@@ -800,7 +814,6 @@
       const coverageRatio = Math.min(100, Math.round((totalBboxArea / totalImgArea) * 100));
       el.telemetryRatio.textContent = `${coverageRatio}%`;
     } else {
-      el.telemetryMaxConf.textContent = '0%';
       el.telemetryRatio.textContent = '0%';
     }
   }
@@ -880,6 +893,94 @@
     const ctx = el.hudCanvas.getContext('2d');
     ctx.clearRect(0, 0, el.hudCanvas.width, el.hudCanvas.height);
     updateBannerUI();
+  }
+
+  function stopYoutube(message = 'Đã dừng YouTube.') {
+    const ws = state.youtubeWs;
+    state.youtubeWs = null;
+    if (ws) ws.close();
+    if (state.activeTab === 'youtube') {
+      state.isStreaming = false;
+      state.detections = [];
+      state.displayDetections = [];
+      state.maxConfidence = null;
+      state.floodDetected = false;
+      state.lastDetectionResult = null;
+      state.currentLatency = state.currentFps = state.clientFps = 0;
+      el.hudLiveTag.style.display = 'none';
+      el.hudCanvas.getContext('2d').clearRect(0, 0, el.hudCanvas.width, el.hudCanvas.height);
+      updateTelemetryUI();
+    }
+    el.btnStartYoutube.disabled = false;
+    el.btnStopYoutube.disabled = true;
+    el.youtubeStatus.textContent = message;
+    if (state.activeTab === 'youtube') updateBannerUI();
+  }
+
+  function startYoutube() {
+    const url = el.youtubeUrl.value.trim();
+    if (!url || !el.youtubeUrl.reportValidity()) {
+      el.youtubeStatus.textContent = 'Hãy nhập link video YouTube hợp lệ.';
+      return;
+    }
+    stopYoutube();
+    stopFrameLoop();
+    el.previewImage.onload = null;
+    el.previewImage.style.display = 'none';
+    el.videoElement.style.display = 'none';
+    el.emptyPlaceholder.style.display = 'flex';
+    el.youtubeStatus.textContent = 'Đang kết nối YouTube…';
+    updateBannerUI();
+    el.btnStartYoutube.disabled = true;
+    el.btnStopYoutube.disabled = false;
+    let ws;
+    try {
+      const endpoint = new URL(state.config.wsUrl);
+      endpoint.pathname = '/ws/youtube-detection';
+      endpoint.search = '';
+      endpoint.hash = '';
+      ws = new WebSocket(endpoint.href);
+      state.youtubeWs = ws;
+    } catch (err) {
+      stopYoutube('Địa chỉ server không hợp lệ. Kiểm tra phần Cài đặt.');
+      return;
+    }
+    ws.onopen = () => ws.send(JSON.stringify({url, fps: Math.min(10, Math.max(1, state.config.fpsLimit))}));
+    ws.onmessage = async event => {
+      if (state.youtubeWs !== ws || state.activeTab !== 'youtube') return;
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.status === 'error' || payload.status === 'ended') {
+          stopYoutube(payload.message);
+          return;
+        }
+        if (payload.status === 'loading') {
+          el.youtubeStatus.textContent = payload.message;
+          updateBannerUI();
+          return;
+        }
+        el.previewImage.src = `data:image/jpeg;base64,${payload.frame}`;
+        await el.previewImage.decode();
+        if (state.youtubeWs !== ws || state.activeTab !== 'youtube') return;
+        el.previewImage.style.display = 'block';
+        el.emptyPlaceholder.style.display = 'none';
+        el.hudLiveTag.style.display = 'inline-flex';
+        state.isStreaming = true;
+        state.clientFps = 0;
+        el.youtubeStatus.textContent = `Đang phân tích YouTube • ${formatTime(payload.video_time || 0)}`;
+        delete payload.frame;
+        handleServerMessage(JSON.stringify(payload));
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'next'}));
+      } catch (err) {
+        if (state.youtubeWs === ws) stopYoutube('Không thể hiển thị video. Hãy thử kết nối lại.');
+      }
+    };
+    ws.onerror = () => {
+      if (state.youtubeWs === ws) stopYoutube('Không kết nối được nguồn YouTube. Kiểm tra server và Internet.');
+    };
+    ws.onclose = () => {
+      if (state.youtubeWs === ws) stopYoutube('Kết nối YouTube đã đóng. Nhấn Phân tích để thử lại.');
+    };
   }
 
   function handleVideoFileUpload(file) {
@@ -978,7 +1079,7 @@
     const samples = window.SAMPLE_DATASETS || [];
     el.sampleGrid.innerHTML = samples.map((s, idx) => `
       <div class="sample-card ${idx === 0 ? 'active' : ''}" data-idx="${idx}">
-        <img src="${s.image}" alt="${s.title}" />
+        <img src="${s.image}" alt="${s.description || s.title}" title="${s.description || s.title}" />
         <div class="sample-label">${s.title}</div>
       </div>
     `).join('');
@@ -1001,7 +1102,13 @@
   // TAB SWITCHING
   // ==============================================================================
   function switchTab(tabId) {
+    stopYoutube();
     state.activeTab = tabId;
+    state.detections = [];
+    state.displayDetections = [];
+    state.maxConfidence = null;
+    state.lastDetectionResult = null;
+    state.floodDetected = false;
     el.sourceTabs.forEach(t => {
       if (t.getAttribute('data-tab') === tabId) t.classList.add('active');
       else t.classList.remove('active');
@@ -1012,6 +1119,7 @@
     el.videoControls.style.display = 'none';
     el.imageControls.style.display = 'none';
     el.sampleControls.style.display = 'none';
+    el.youtubeControls.style.display = 'none';
 
     stopCamera();
     pauseVideo();
@@ -1032,11 +1140,16 @@
         el.emptyPlaceholder.style.display = 'flex';
         el.videoElement.style.display = 'none';
       }
+    } else if (tabId === 'youtube') {
+      el.youtubeControls.style.display = 'flex';
+      el.emptyPlaceholder.style.display = 'flex';
+      el.videoElement.style.display = 'none';
+      el.previewImage.style.display = 'none';
+      updateBannerUI();
     } else if (tabId === 'image') {
       el.imageControls.style.display = 'flex';
       if (state.activeImageSrc) {
-        el.previewImage.style.display = 'block';
-        el.emptyPlaceholder.style.display = 'none';
+        loadImageForAnalysis(state.activeImageSrc, state.activeImageName);
       } else {
         el.emptyPlaceholder.style.display = 'flex';
         el.previewImage.style.display = 'none';
@@ -1099,8 +1212,8 @@
       el.inputConfidence.value = state.config.confidenceThreshold;
       el.valConfidence.textContent = `${Math.round(state.config.confidenceThreshold * 100)}%`;
       el.checkSound.checked = state.config.soundAlert;
-      el.checkShowBbox.checked = state.config.showBbox;
-      el.checkShowLabels.checked = state.config.showLabels;
+      el.checkShowBbox.checked = true;
+      el.checkShowLabels.checked = true;
       el.settingsModal.classList.add('open');
     });
 
@@ -1114,8 +1227,14 @@
       state.config.fpsLimit = parseInt(el.inputFps.value, 10) || 15;
       state.config.confidenceThreshold = parseFloat(el.inputConfidence.value) || 0.45;
       state.config.soundAlert = el.checkSound.checked;
-      state.config.showBbox = el.checkShowBbox.checked;
-      state.config.showLabels = el.checkShowLabels.checked;
+      state.config.showBbox = true;
+      state.config.showLabels = true;
+      if (state.lastDetectionResult) {
+        updateDetectionState(state.lastDetectionResult);
+        renderHUD(state.lastDetectionResult.metadata);
+        updateTelemetryUI();
+        updateBannerUI();
+      }
 
       el.settingsModal.classList.remove('open');
 
@@ -1157,6 +1276,13 @@
     });
 
     // Video
+    el.btnStartYoutube.addEventListener('click', startYoutube);
+    el.btnStopYoutube.addEventListener('click', () => stopYoutube());
+    el.youtubeUrl.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !el.btnStartYoutube.disabled) startYoutube();
+    });
+    window.addEventListener('beforeunload', () => stopYoutube());
+
     el.btnSelectVideo.addEventListener('click', () => el.videoFileInput.click());
     el.videoFileInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files[0]) {
@@ -1256,7 +1382,7 @@
     bindEvents();
     renderIncidentList();
     connectWebSocket();
-    setupCameraList();
+    switchTab('video');
 
     // Định kỳ ping health check server mỗi 6 giây
     setInterval(checkServerHealth, 6000);

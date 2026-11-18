@@ -1,52 +1,65 @@
-# Hướng dẫn quy trình huấn luyện RT-DETR trên GPU NVIDIA RTX 3060 Ti
+﻿# Huấn luyện RT-DETR một lớp flood
 
-Thư mục này chứa đầy đủ code và cấu trúc chuẩn bị huấn luyện mô hình **RT-DETR (Ultralytics)** để nhận diện ngập lụt.
+## Notebook Kaggle
 
----
+- `train_kaggle.ipynb`: huấn luyện từ pretrained `rtdetr-l.pt`, mặc định 80 epoch.
+- `finetune_kaggle.ipynb`: học thêm từ checkpoint cũ, mặc định 20 epoch, batch 4, AdamW và lr0=1e-5.
+- `build_finetune_notebook.py`: tạo lại notebook fine-tune dựa trên notebook huấn luyện.
 
-## Cấu trúc thư mục
+Notebook dùng một lớp `0 = flood`, chấp nhận tên `flood` hoặc `Flood`. Bật GPU và Internet trên Kaggle, import notebook và chạy từng ô từ trên xuống.
+
+## Dữ liệu
+
+Ví dụ cấu trúc Roboflow:
 
 ```text
-flood_training/
-├── flood_dataset/
-│   ├── data.yaml            # Cấu hình dataset (đường dẫn và nhãn 0, 1, 2)
+dataset/
+├── data.yaml
+├── train/
 │   ├── images/
-│   │   ├── train/           # Đặt ảnh dùng để Train vào đây
-│   │   └── val/             # Đặt ảnh dùng để Đánh giá (Val) vào đây
 │   └── labels/
-│       ├── train/           # Đặt file nhãn .txt tương ứng với images/train
-│       └── val/             # Đặt file nhãn .txt tương ứng với images/val
-├── train.py                 # Script huấn luyện tự động với RTX 3060 Ti
-├── export.py                # Script xuất sang ONNX và tự copy sang server
-└── README.md
+├── valid/
+│   ├── images/
+│   └── labels/
+└── test/             # Tùy chọn, giữ riêng để đánh giá cuối
 ```
 
----
-
-## 4 Bước thực hiện:
-
-### Bước 1: Bỏ ảnh và nhãn vào `flood_dataset`
-1. Copy ảnh của bạn vào `flood_dataset/images/train/` và `flood_dataset/images/val/`.
-2. Copy các file nhãn `.txt` tương ứng vào `flood_dataset/labels/train/` và `flood_dataset/labels/val/`.
-- Định dạng nhãn chuẩn YOLO: `<class_id> <x_center> <y_center> <width> <height>` (tất cả giá trị từ 0.0 đến 1.0).
-  - Class `0`: `duong_ngap`
-  - Class `1`: `xe_ngap`
-  - Class `2`: `nguoi_loi_nuoc`
-
-### Bước 2: Kiểm tra cấu hình `data.yaml`
-Mở file `flood_dataset/data.yaml` để kiểm tra hoặc thêm bớt các class nếu bạn muốn.
-
-### Bước 3: Chạy huấn luyện (Training)
-Chạy lệnh sau tại thư mục này:
-```bash
-python train.py
+```yaml
+train: train/images
+val: valid/images
+nc: 1
+names: ['flood']
 ```
-- Script đã cấu hình tối ưu sẵn cho **RTX 3060 Ti (8GB VRAM)**: Batch size = 8, Image size = 640x640, Epochs = 100.
-- Kết quả và file trọng số tốt nhất sẽ tự động lưu tại `runs_flood/rtdetr_flood_exp/weights/best.pt`.
 
-### Bước 4: Export sang ONNX
-Sau khi train xong, bạn chỉ cần gõ:
-```bash
-python export.py
+Nhãn YOLO detection: `0 x_center y_center width height`, chuẩn hóa tọa độ về [0, 1]. Ảnh không ngập cần có file nhãn rỗng. Notebook cũng hỗ trợ chuyển polygon thành bounding box.
+
+## Học thêm ảnh mới
+
+Thêm ba nguồn vào Kaggle Input: checkpoint cũ, dataset cũ đầy đủ và dataset ảnh mới đã gán nhãn. Trong `finetune_kaggle.ipynb`, điền:
+
+```python
+BASE_WEIGHTS = '/kaggle/input/.../best.pt'
+OLD_DATASET_YAML = '/kaggle/input/.../data.yaml'
+NEW_DATASET_YAML = '/kaggle/input/.../data.yaml'
 ```
-- Lệnh này sẽ tối ưu hóa ONNX graph (`simplify=True`, `opset=16`) và **tự động copy file `rt_detr_flood.onnx` sang thư mục máy chủ `flood_detector_server/`** để chạy real-time!
+
+Kiểm tra `EXPECTED_BASE_SHA256`: đây là fingerprint của checkpoint chọn làm mốc khi notebook được tạo. Khi chủ động chọn checkpoint mới, thay bằng SHA256 của file đó. Trên Windows có thể lấy hash bằng:
+
+```powershell
+Get-FileHash -LiteralPath .\flood_detector_server\best.pt -Algorithm SHA256
+```
+
+Notebook giữ split sẵn có, gộp dữ liệu, chặn ảnh giống hệt giữa các split và so sánh checkpoint cũ/mới trên cùng validation. Vẫn cần tránh các khung hình gần nhau của cùng video nằm ở nhiều split.
+
+`resume=False` trong notebook tạo lượt fine-tune mới từ checkpoint đã nạp. Cấu hình 20 epoch/lr0=1e-5 là điểm khởi đầu để thử, cần đánh giá lại trước khi triển khai.
+
+Sau khi train, lưu version và tải `best_finetuned.pt`, `finetune_results.csv`, `finetune_comparison.json`. Giữ model cũ để so sánh trên bộ test đường phố độc lập.
+
+## Công cụ khác
+
+- `evaluate_checkpoints.py`: chạy checkpoint trên thư mục ảnh và lưu ảnh nhận diện/CSV; số ảnh có dự đoán không phải accuracy.
+- `train.py`: script local cũ, yêu cầu tự chuẩn bị `flood_dataset/data.yaml` và dữ liệu tương ứng. Dataset cục bộ không được đưa lên Git.
+- `export.py`: công cụ xuất ONNX cũ, không cần cho server đang dùng trực tiếp `.pt`.
+- `merge_class.py`: công cụ cũ sửa nhãn tại chỗ bằng cách gộp mọi class về 0. Không chạy với dataset một lớp hiện tại hoặc khi các class khác không có nghĩa là ngập.
+
+Checkpoint `best.pt` tốt nhất của mỗi lượt được chọn theo metric validation; hậu tố thư mục như `amp-3` chỉ là số thứ tự lượt chạy.

@@ -1,233 +1,31 @@
 import base64
+import asyncio
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 import uvicorn
+from youtube_stream import canonical_youtube_url, youtube_events, next_event
+from detection_result import detection_fields
+from pytorch_engine import RTDETRInferenceEngine
 
 # ==============================================================================
 # CẤU HÌNH HỆ THỐNG & HYPERPARAMETERS
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_MODEL_PATH = os.path.join(BASE_DIR, "rt_detr_flood.onnx")
+DEFAULT_MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 FRONTEND_DIR = os.path.join(os.path.dirname(BASE_DIR), "flood_detector_frontend")
 
 
-INPUT_WIDTH = 640
-INPUT_HEIGHT = 640
-CONFIDENCE_THRESHOLD = 0.45
-
-# Danh sách 3 nhãn theo bộ dữ liệu Roboflow:
-# 0 = Flood (Ngập lụt), 1 = puddle (Vũng nước đọng), 2 = wet surface (Mặt đường ướt)
-CLASS_NAMES = {
-    0: "Flood (Ngập lụt)",
-    1: "puddle (Vũng nước)",
-    2: "wet surface (Đường ướt)"
-}
-
-# Màu sắc riêng biệt cho từng mức độ cảnh báo:
-# Đỏ (#EF4444) cho Ngập lụt, Cam/Vàng (#F59E0B) cho Vũng nước, Xanh dương (#06B6D4) cho Mặt đường ướt
-CLASS_COLORS = {
-    0: "#EF4444",
-    1: "#F59E0B",
-    2: "#06B6D4"
-}
-
-
-# ==============================================================================
-# CLASS ĐIỀU PHỐI SUY LUẬN (RT-DETR INFERENCE ENGINE)
-# ==============================================================================
-class RTDETRInferenceEngine:
-    def __init__(self, model_path: str):
-        self.model_path = model_path
-        self.session: Optional[ort.InferenceSession] = None
-        self.input_names: List[str] = []
-        self.output_names: List[str] = []
-        self.requires_orig_target_sizes: bool = False
-
-    def load_model(self):
-        """Khởi tạo ONNXRuntime InferenceSession với tối ưu hóa luồng và provider."""
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(
-                f"Không tìm thấy file mô hình ONNX tại: {self.model_path}. "
-                f"Vui lòng đặt file 'rt_detr_flood.onnx' vào thư mục server hoặc cấu hình biến môi trường MODEL_PATH."
-            )
-
-        # Ưu tiên GPU (CUDA/TensorRT) nếu có, fallback về CPU
-        available_providers = ort.get_available_providers()
-        providers = []
-        if "CUDAExecutionProvider" in available_providers:
-            providers.append((
-                "CUDAExecutionProvider",
-                {
-                    "device_id": 0,
-                    "arena_extend_strategy": "kNextPowerOfTwo",
-                    "cudnn_conv_algo_search": "EXHAUSTIVE"
-                }
-            ))
-        providers.append("CPUExecutionProvider")
-
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        sess_options.intra_op_num_threads = max(1, (os.cpu_count() or 4) // 2)
-
-        self.session = ort.InferenceSession(self.model_path, sess_options=sess_options, providers=providers)
-
-        # Trích xuất metadata input/output
-        self.input_names = [inp.name for inp in self.session.get_inputs()]
-        self.output_names = [out.name for out in self.session.get_outputs()]
-
-        # RT-DETR chuẩn của Paddle/Ultralytics có thể cần 2 inputs: 'images' & 'orig_target_sizes'
-        self.requires_orig_target_sizes = len(self.input_names) > 1
-
-        print(f"✅ ONNX Model loaded successfully.")
-        print(f"   Providers: {self.session.get_providers()}")
-        print(f"   Inputs: {self.input_names} | Outputs: {self.output_names}")
-
-    def preprocess(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int]]:
-        """
-        Tiền xử lý ảnh trực tiếp trong RAM (Zero-disk I/O):
-        - Resize trực tiếp về (INPUT_WIDTH, INPUT_HEIGHT) theo chuẩn RT-DETR (scale_fill=True).
-        - Chuyển màu BGR -> RGB.
-        - Chuẩn hóa [0, 255] -> [0.0, 1.0] dạng Float32.
-        - HWC -> CHW và thêm chiều Batch Dimension (1, C, H, W).
-        """
-        orig_h, orig_w = img_bgr.shape[:2]
-
-        # 1. Resize trực tiếp về 640x640 (chuẩn RT-DETR)
-        resized = cv2.resize(img_bgr, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
-
-        # 2. BGR -> RGB & Chuẩn hóa sang float32 [0.0, 1.0]
-        blob = resized[:, :, ::-1].astype(np.float32) / 255.0
-
-        # 3. HWC -> CHW -> NCHW: (1, 3, 640, 640)
-        blob = np.ascontiguousarray(np.transpose(blob, (2, 0, 1))[None, ...])
-
-        return blob, (orig_w, orig_h)
-
-    def postprocess(
-        self,
-        outputs: List[np.ndarray],
-        orig_size: Tuple[int, int]
-    ) -> List[Dict]:
-        """
-        Hậu xử lý đầu ra của RT-DETR:
-        - Tự động thích ứng cả 2 dạng ONNX export phổ biến:
-          + Dạng tách: boxes (1, 300, 4) và scores (1, 300, num_classes)
-          + Dạng gộp (Ultralytics RT-DETR): (1, 300, 6) gồm [cx, cy, w, h, score, class_id] chuẩn hóa [0, 1]
-            hoặc [x1, y1, x2, y2, score, class_id]
-        - Lọc ngưỡng điểm tin cậy (Confidence Threshold).
-        - Ánh xạ tọa độ về khung hình gốc (orig_w, orig_h).
-        """
-        orig_w, orig_h = orig_size
-        detections = []
-
-        if len(outputs) == 2:
-            # Case 1: Tách rời boxes và scores/logits
-            boxes, scores = outputs[0][0], outputs[1][0]  # (300, 4), (300, num_classes)
-            class_ids = np.argmax(scores, axis=-1)
-            confidences = np.max(scores, axis=-1)
-
-            valid_mask = confidences >= CONFIDENCE_THRESHOLD
-            valid_boxes = boxes[valid_mask]
-            valid_scores = confidences[valid_mask]
-            valid_classes = class_ids[valid_mask]
-
-        elif len(outputs) == 1:
-            # Case 2: Output gộp (1, 300, 6)
-            data = outputs[0][0]
-            if data.shape[-1] >= 6:
-                confidences = data[:, 4]
-                valid_mask = confidences >= CONFIDENCE_THRESHOLD
-                valid_data = data[valid_mask]
-                valid_boxes = valid_data[:, :4]
-                valid_scores = valid_data[:, 4]
-                valid_classes = valid_data[:, 5].astype(int)
-            else:
-                return detections
-        else:
-            return detections
-
-        for box, score, cls_id in zip(valid_boxes, valid_scores, valid_classes):
-            cls_id_int = int(cls_id)
-            if cls_id_int not in CLASS_NAMES:
-                continue
-
-            b0, b1, b2, b3 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
-
-            # Kiểm tra xem tọa độ đang ở dạng chuẩn hóa [0, 1] (cx, cy, w, h của Ultralytics RT-DETR)
-            # hay dạng pixel [0, 640] (x1, y1, x2, y2)
-            if max(b0, b1, b2, b3) <= 1.5:
-                cx, cy, bw, bh = b0, b1, b2, b3
-                x1 = (cx - bw / 2.0) * orig_w
-                y1 = (cy - bh / 2.0) * orig_h
-                x2 = (cx + bw / 2.0) * orig_w
-                y2 = (cy + bh / 2.0) * orig_h
-            else:
-                x1 = b0 * (orig_w / INPUT_WIDTH)
-                y1 = b1 * (orig_h / INPUT_HEIGHT)
-                x2 = b2 * (orig_w / INPUT_WIDTH)
-                y2 = b3 * (orig_h / INPUT_HEIGHT)
-
-            real_x1 = max(0, min(orig_w, int(round(x1))))
-            real_y1 = max(0, min(orig_h, int(round(y1))))
-            real_x2 = max(0, min(orig_w, int(round(x2))))
-            real_y2 = max(0, min(orig_h, int(round(y2))))
-
-            if real_x2 <= real_x1 or real_y2 <= real_y1:
-                continue
-
-            label = CLASS_NAMES.get(cls_id_int, f"Class {cls_id_int}")
-
-            detections.append({
-                "bbox": {
-                    "x_min": real_x1,
-                    "y_min": real_y1,
-                    "x_max": real_x2,
-                    "y_max": real_y2
-                },
-                "confidence": round(float(score), 4),
-                "class_id": cls_id_int,
-                "label": label,
-                "color": CLASS_COLORS.get(cls_id_int, "#EF4444")
-            })
-
-        return detections
-
-    def predict(self, img_bgr: np.ndarray) -> Tuple[List[Dict], float]:
-        t_start = time.perf_counter()
-
-        blob, orig_size = self.preprocess(img_bgr)
-
-        # Xây dựng input feed
-        inputs_dict = {self.input_names[0]: blob}
-        if self.requires_orig_target_sizes:
-            # Tensor (1, 2) chứa [H, W] gốc nếu graph mô hình yêu cầu
-            inputs_dict[self.input_names[1]] = np.array([[orig_size[1], orig_size[0]]], dtype=np.int64)
-
-        # Chạy inference ONNX
-        outputs = self.session.run(self.output_names, inputs_dict)
-
-        # Hậu xử lý trích xuất bounding boxes
-        results = self.postprocess(outputs, orig_size)
-        inference_time_ms = round((time.perf_counter() - t_start) * 1000, 2)
-
-        return results, inference_time_ms
-
-
-# ==============================================================================
-# QUẢN LÝ VÒNG ĐỜI ỨNG DỤNG (LIFESPAN EVENT)
-# ==============================================================================
 engine: Optional[RTDETRInferenceEngine] = None
 
 @asynccontextmanager
@@ -239,10 +37,10 @@ async def lifespan(app: FastAPI):
         engine.load_model()
     except FileNotFoundError as fnf_err:
         print(f"⚠️ CẢNH BÁO: {fnf_err}")
-        print("ℹ️ Server vẫn đang chạy. Hãy đặt file .onnx vào đúng đường dẫn để sẵn sàng suy luận.")
+        print("ℹ️ Server vẫn đang chạy. Đặt best.pt vào đúng đường dẫn rồi khởi động lại server.")
     yield
     print("🛑 Releasing resources and shutting down...")
-    del engine
+    engine = None
 
 
 # ==============================================================================
@@ -302,6 +100,8 @@ async def websocket_flood_detection(websocket: WebSocket):
         while True:
             # Nhận message từ client (hỗ trợ binary hoặc text base64)
             data = await websocket.receive()
+            if data['type'] == 'websocket.disconnect':
+                break
 
             raw_frame_data = None
             if "bytes" in data and data["bytes"]:
@@ -313,10 +113,10 @@ async def websocket_flood_detection(websocket: WebSocket):
                 continue
 
             # Kiểm tra trạng thái mô hình
-            if engine is None or engine.session is None:
+            if engine is None or not engine.is_ready:
                 await websocket.send_json({
                     "status": "error",
-                    "message": "Model not loaded yet. Please place 'rt_detr_flood.onnx' in the server directory."
+                    "message": "Mô hình chưa được tải. Hãy đặt best.pt trong thư mục server."
                 })
                 continue
 
@@ -330,7 +130,8 @@ async def websocket_flood_detection(websocket: WebSocket):
                 continue
 
             # 2. Thực thi suy luận với RT-DETR
-            detections, latency_ms = engine.predict(frame)
+            candidates, latency_ms = await asyncio.to_thread(engine.predict, frame, include_candidates=True)
+            fields = detection_fields(candidates)
             fps = round(1000.0 / latency_ms, 1) if latency_ms > 0 else 0.0
 
             # 3. Phản hồi JSON ngay lập tức cho client
@@ -339,14 +140,11 @@ async def websocket_flood_detection(websocket: WebSocket):
                 "timestamp": time.time(),
                 "latency_ms": latency_ms,
                 "fps": fps,
-                "detections": detections,
-                # Không có bbox ngap_lut đạt ngưỡng confidence => không phát hiện ngập.
-                "flood_detected": len(detections) > 0,
-                "flood_status": "ngap_lut" if detections else "khong_ngap_lut",
+                **fields,
                 "metadata": {
                     "frame_width": frame.shape[1],
                     "frame_height": frame.shape[0],
-                    "objects_count": len(detections)
+                    "objects_count": len(fields['detections'])
                 }
             }
             await websocket.send_json(response_payload)
@@ -363,13 +161,76 @@ async def websocket_flood_detection(websocket: WebSocket):
 
 
 
+@app.websocket("/ws/youtube-detection")
+async def websocket_youtube_detection(websocket: WebSocket):
+    await websocket.accept()
+    stop = threading.Event()
+    events = None
+    pending = receiver = None
+    try:
+        config = await asyncio.wait_for(websocket.receive_json(), timeout=15)
+        url = canonical_youtube_url(config.get('url', ''))
+        fps = float(config.get('fps', 5))
+        if not np.isfinite(fps) or not 1 <= fps <= 10:
+            raise ValueError('FPS YouTube phải nằm trong khoảng 1–10.')
+        if engine is None or not engine.is_ready:
+            raise ValueError('Mô hình chưa được tải. Kiểm tra file best.pt trên server.')
+        await websocket.send_json({'status': 'loading', 'message': 'Đang kết nối YouTube…'})
+        events = youtube_events(url, engine, fps, stop)
+        while not stop.is_set():
+            pending = asyncio.create_task(asyncio.to_thread(next_event, events))
+            receiver = asyncio.create_task(websocket.receive_json())
+            done, _ = await asyncio.wait((pending, receiver), return_when=asyncio.FIRST_COMPLETED)
+            if receiver in done:
+                receiver.result()  # Raise on disconnect; any message stops this stream.
+                break
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+            payload = pending.result()
+            if payload is None:
+                await websocket.send_json({'status': 'ended', 'message': 'Đã phát hết video.'})
+                break
+            await websocket.send_json(payload)
+            if payload['status'] == 'success':
+                # One frame in flight: wait until the browser displays it.
+                reply = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+                if reply.get('type') != 'next':
+                    break
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, ValueError) else (
+            'Không đọc được video YouTube. Video có thể bị giới hạn hoặc nguồn phát đã thay đổi. '
+            'Thử link công khai khác hoặc cập nhật yt-dlp.'
+        )
+        print(f'YouTube stream error: {type(exc).__name__}')
+        try:
+            await websocket.send_json({'status': 'error', 'message': message})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        if receiver:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+        # Let an outstanding network read finish before closing its generator.
+        if pending:
+            await asyncio.gather(pending, return_exceptions=True)
+        if events:
+            await asyncio.to_thread(events.close)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.post("/api/detect")
 async def api_detect_image(file: Optional[UploadFile] = File(None), request: Request = None):
     """
     REST API suy luận ngập lụt từ file ảnh tải lên (Multipart Form hoặc Raw Body).
     """
-    if engine is None or engine.session is None:
-        raise HTTPException(status_code=503, detail="Mô hình ONNX chưa được tải. Hãy đặt file rt_detr_flood.onnx vào thư mục server.")
+    if engine is None or not engine.is_ready:
+        raise HTTPException(status_code=503, detail="Mô hình chưa được tải. Hãy đặt best.pt vào thư mục server.")
 
     raw_bytes = None
     if file is not None:
@@ -384,7 +245,8 @@ async def api_detect_image(file: Optional[UploadFile] = File(None), request: Req
     if frame is None:
         raise HTTPException(status_code=400, detail="Không thể giải mã định dạng ảnh.")
 
-    detections, latency_ms = engine.predict(frame)
+    candidates, latency_ms = await asyncio.to_thread(engine.predict, frame, include_candidates=True)
+    fields = detection_fields(candidates)
     fps = round(1000.0 / latency_ms, 1) if latency_ms > 0 else 0.0
 
     return {
@@ -392,13 +254,11 @@ async def api_detect_image(file: Optional[UploadFile] = File(None), request: Req
         "timestamp": time.time(),
         "latency_ms": latency_ms,
         "fps": fps,
-        "detections": detections,
-        "flood_detected": len(detections) > 0,
-        "flood_status": "ngap_lut" if detections else "khong_ngap_lut",
+        **fields,
         "metadata": {
             "frame_width": frame.shape[1],
             "frame_height": frame.shape[0],
-            "objects_count": len(detections)
+            "objects_count": len(fields['detections'])
         }
     }
 
@@ -429,11 +289,15 @@ if os.path.exists(FRONTEND_DIR):
 @app.get("/health")
 def health_check():
     """Endpoint kiểm tra sức khỏe của dịch vụ suy luận."""
-    is_ready = engine is not None and engine.session is not None
+    is_ready = engine is not None and engine.is_ready
     return {
         "status": "online",
         "model_loaded": is_ready,
-        "providers": engine.session.get_providers() if is_ready else []
+        "providers": ["PyTorchCUDA" if engine.device != "cpu" else "PyTorchCPU"] if is_ready else [],
+        "runtime": "PyTorch / Ultralytics",
+        "device": engine.device if is_ready else None,
+        "gpu_name": engine.gpu_name if is_ready else None,
+        "model_path": engine.model_path if engine else MODEL_PATH
     }
 
 
